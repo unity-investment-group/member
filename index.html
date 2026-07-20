@@ -736,12 +736,7 @@ const CONFIG = {
   APPS_SCRIPT_URL: "https://script.google.com/macros/s/AKfycbznNdI2Z2v_ECIOuDciLIr3ygtwSZKYxHi3XsEFXJL36Mx8wAzajR2Ndpg-KgtChG6f/exec", // <-- Paste your deployed Google Apps Script Web App URL here
   ADMIN_USERNAME: "admin",
   ADMIN_PASSWORD: "123456",
-  SHARE_PRICE: 2000,
-  // The org's receiving bank account. Uploaded payment screenshots must
-  // show a transfer to this account/name/bank or submission is blocked.
-  RECEIVER_ACCOUNT: "1911570512212",
-  RECEIVER_NAME: "MD SALAH UDDIN SABUZ",
-  RECEIVER_BANK_ALIASES: ["dutch bangla bank","dutch-bangla bank","dbbl","dbbl plc","dutch bangla bank plc","dutch bangla bank ltd"]
+  SHARE_PRICE: 2000
 };
 
 const BANK_LIST = [
@@ -771,8 +766,7 @@ const STATE = {
   paidLabels: [],          // labels already paid by the currently selected member
   forgotMemberId: null,    // memberId mid-way through the forgot-password flow
   ocrRunning: false,       // true while Tesseract is reading the current screenshot
-  txnIdIsDuplicate: false, // true if the live duplicate check found this Transaction ID already used
-  receiverVerified: null   // true/false once checked, null = not yet checked or inconclusive
+  txnIdIsDuplicate: false  // true if the live duplicate check found this Transaction ID already used
 };
 
 /* ============================================================
@@ -1021,24 +1015,6 @@ const Payments = {
     document.getElementById("fSession").value = m.session;
     document.getElementById("fShares").value = m.shares;
     document.getElementById("fEmail").value = m.email || "";
-
-    // Pre-fill Bank Name / Account Number from Member_Master, but leave
-    // them fully editable — same autocomplete component and manual entry
-    // as before, this just saves the member from retyping their own info.
-    const bankInput = document.getElementById("fBankInput");
-    const bankHidden = document.getElementById("fBank");
-    const clearBankBtn = document.getElementById("clearBankBtn");
-    if (m.bankName && BANK_LIST.includes(m.bankName)) {
-      bankInput.value = m.bankName;
-      bankHidden.value = m.bankName;
-      clearBankBtn?.classList.remove("hidden");
-    } else {
-      bankInput.value = "";
-      bankHidden.value = "";
-      clearBankBtn?.classList.add("hidden");
-    }
-    document.getElementById("fAccountNumber").value = m.bankAccount || "";
-
     document.getElementById("paymentFormPanel").classList.remove("disabled");
     await Payments.loadInstallmentChecklist(m.memberId);
     Payments.calculateAmount();
@@ -1120,7 +1096,6 @@ const Payments = {
     if (!STATE.imageBase64) { UI.toast("Please attach your payment screenshot.", "error"); return false; }
     if (STATE.ocrRunning) { UI.toast("Still reading your screenshot — please wait a moment and try again.", "error"); return false; }
     if (STATE.txnIdIsDuplicate) { UI.toast("This Transaction ID has already been used. Please check it before submitting.", "error"); return false; }
-    if (STATE.receiverVerified === false) { UI.toast("This screenshot doesn't appear to be a payment to our organization's account. Please upload the correct screenshot.", "error"); return false; }
     return true;
   },
   async submitPayment(e) {
@@ -1183,7 +1158,6 @@ const Payments = {
     STATE.paidLabels = [];
     STATE.ocrRunning = false;
     STATE.txnIdIsDuplicate = false;
-    STATE.receiverVerified = null;
     document.getElementById("ocrStatus").classList.add("hidden");
     document.getElementById("ocrWarning").classList.add("hidden");
   },
@@ -1380,7 +1354,6 @@ function setupImageUpload() {
   removeBtn.addEventListener("click", () => {
     STATE.imageBase64=""; STATE.imageFileName=""; input.value=""; preview.classList.add("hidden");
     STATE.ocrRunning = false;
-    STATE.receiverVerified = null;
     document.getElementById("ocrStatus").classList.add("hidden");
     document.getElementById("ocrWarning").classList.add("hidden");
   });
@@ -1413,19 +1386,13 @@ function setupImageUpload() {
 const ReceiptOCR = {
   async run(file) {
     const statusEl = document.getElementById("ocrStatus");
-    const warn = document.getElementById("ocrWarning");
     STATE.ocrRunning = true;
-    STATE.receiverVerified = null;
-    warn.classList.add("hidden");
     statusEl.classList.remove("hidden");
     statusEl.style.color = "var(--ink-soft)";
     statusEl.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Reading screenshot for transaction details…`;
     try {
       const { data: { text } } = await Tesseract.recognize(file, "eng");
-      const rawText = text || "";
-      const fields = ReceiptOCR.extract(rawText);
-      const receiver = ReceiptOCR.verifyReceiver(rawText);
-      STATE.receiverVerified = receiver.verified;
+      const fields = ReceiptOCR.extract(text || "");
       let filled = [];
 
       if (fields.transactionId) {
@@ -1444,163 +1411,38 @@ const ReceiptOCR = {
       if (fields.amount) {
         const expected = Number(document.getElementById("fAmount").value) || 0;
         if (expected && Math.abs(fields.amount - expected) > 0.01) {
-          ReceiptOCR.showWarning("warn", `<i class="fa-solid fa-triangle-exclamation"></i> The screenshot shows an amount of ${Utils.formatMoney(fields.amount)}, but the expected amount for your selected installments is ${Utils.formatMoney(expected)}. Please double-check before submitting.`);
+          const warn = document.getElementById("ocrWarning");
+          warn.classList.remove("hidden");
+          warn.style.background = "var(--warning-bg, #fff4e0)";
+          warn.style.color = "var(--warning, #a15c00)";
+          warn.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> The screenshot shows an amount of ${Utils.formatMoney(fields.amount)}, but the expected amount for your selected installments is ${Utils.formatMoney(expected)}. Please double-check before submitting.`;
         }
       }
 
-      // Receiver verification takes priority in the status line since it's
-      // the one condition that actually blocks submission.
-      if (receiver.verified === false) {
-        ReceiptOCR.showWarning("danger", `<i class="fa-solid fa-ban"></i> This screenshot doesn't look like a payment to our organization's account (${receiver.reasons.join("; ")}). Please double-check and upload the correct screenshot — this one can't be submitted.`);
-        statusEl.style.color = "var(--danger)";
-        statusEl.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Receiver account could not be verified.`;
-        return;
-      }
-
       statusEl.style.color = "var(--success)";
-      let statusMsg = filled.length
-        ? `Auto-filled from screenshot: ${filled.join(", ")}. Please review before submitting.`
-        : `Screenshot read, but no fields could be confidently auto-filled — please fill them in manually.`;
-      if (receiver.verified === true) {
-        statusMsg += ` Receiver account verified.`;
-      } else {
-        statusMsg += ` Receiver account could not be automatically confirmed — please make sure this is a transfer to our organization's account before submitting.`;
-      }
-      statusEl.innerHTML = `<i class="fa-solid fa-circle-check"></i> ${statusMsg}`;
+      statusEl.innerHTML = filled.length
+        ? `<i class="fa-solid fa-circle-check"></i> Auto-filled from screenshot: ${filled.join(", ")}. Please review before submitting.`
+        : `<i class="fa-solid fa-circle-info"></i> Screenshot read, but no fields could be confidently auto-filled — please fill them in manually.`;
     } catch (err) {
       statusEl.style.color = "var(--danger)";
-      statusEl.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Could not read text from the screenshot automatically. Please fill in the fields manually and make sure this is a transfer to our organization's account.`;
+      statusEl.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Could not read text from the screenshot automatically. Please fill in the fields manually.`;
     } finally {
       STATE.ocrRunning = false;
     }
   },
 
-  showWarning(kind, html) {
-    const warn = document.getElementById("ocrWarning");
-    warn.classList.remove("hidden");
-    if (kind === "danger") {
-      warn.style.background = "var(--danger-bg, #fdeaea)";
-      warn.style.color = "var(--danger)";
-    } else {
-      warn.style.background = "var(--warning-bg, #fff4e0)";
-      warn.style.color = "var(--warning, #a15c00)";
-    }
-    warn.innerHTML = html;
-  },
-
   /**
-   * Checks that the screenshot shows a transfer TO our organization's
-   * account — not the sender's own bank/account. Deliberately tolerant
-   * of masked account digits ("191157*****2212", "********2212") and
-   * of minor name variations (dots, "Md" vs "Md.", middle name dropped),
-   * per how these receipts commonly render. Returns verified:false only
-   * when we found receiver-looking information that clearly does NOT
-   * match — if OCR simply didn't capture enough text to check, we return
-   * verified:null (inconclusive) rather than falsely rejecting a good
-   * payment because of a bad scan.
-   */
-  verifyReceiver(text) {
-    const reasons = [];
-    let accountFound = false, accountMatch = false;
-    let nameFound = false, nameMatch = false;
-    let bankFound = false, bankMatch = false;
-
-    // --- Account number (handles full, masked, and last-4-only forms) ---
-    const target = CONFIG.RECEIVER_ACCOUNT.replace(/\D/g, "");
-    const last4 = target.slice(-4);
-    const candidates = text.match(/[\d\*]{4,}(?:[\s\-][\d\*]{2,6}){0,4}/g) || [];
-    for (let raw of candidates) {
-      const c = raw.replace(/[\s\-]/g, "");
-      if (!/\d/.test(c)) continue; // all-stars, no digits — not useful
-      if (c.length < 4) continue;
-      accountFound = true;
-      if (/^\d+$/.test(c)) {
-        // pure digits: either the full number, or just the last 4
-        if (c === target) { accountMatch = true; break; }
-        if (c.length === 4 && c === last4) {
-          // last-4-only: only trust it if it appears near an account-ish label
-          const idx = text.indexOf(raw);
-          const context = text.slice(Math.max(0, idx - 30), idx).toLowerCase();
-          if (/(a\/c|account|receiver|beneficiary|to\s*account|credited)/.test(context)) { accountMatch = true; break; }
-        }
-      } else if (c.length === target.length) {
-        // masked, same length as the real account — every non-* digit must match
-        let ok = true;
-        for (let i = 0; i < c.length; i++) {
-          if (c[i] !== "*" && c[i] !== target[i]) { ok = false; break; }
-        }
-        if (ok) { accountMatch = true; break; }
-      } else {
-        // masked with different length, e.g. "********2212" — require the
-        // visible digit run(s) to match the corresponding suffix/prefix
-        const digitsOnly = c.replace(/\*/g, "");
-        if (digitsOnly.length >= 4 && target.endsWith(digitsOnly) && c.endsWith(digitsOnly)) {
-          accountMatch = true; break;
-        }
-      }
-    }
-    if (accountFound && !accountMatch) reasons.push("receiver account number doesn't match");
-    else if (!accountFound) reasons.push("receiver account number not found on screenshot");
-
-    // --- Receiver name (tolerant of "Md"/"Md." and a dropped middle name) ---
-    const coreTokens = CONFIG.RECEIVER_NAME.split(/\s+/).filter(w => w.toUpperCase() !== "MD");
-    let matchedTokens = 0;
-    for (const tok of coreTokens) {
-      const re = new RegExp("\\b" + tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "i");
-      if (re.test(text)) matchedTokens++;
-    }
-    nameFound = matchedTokens > 0;
-    nameMatch = matchedTokens >= Math.min(2, coreTokens.length);
-    if (nameFound && !nameMatch) reasons.push("receiver name doesn't match");
-    else if (!nameFound) reasons.push("receiver name not found on screenshot");
-
-    // --- Receiver bank (informational only — not required to pass) ---
-    const normalized = text.toLowerCase().replace(/\s+/g, " ");
-    bankMatch = CONFIG.RECEIVER_BANK_ALIASES.some(alias => normalized.includes(alias));
-    bankFound = bankMatch;
-
-    const anythingFound = accountFound || nameFound || bankFound;
-    if (!anythingFound) {
-      return { verified: null, reasons: ["not enough text could be read from the screenshot to check the receiver"] };
-    }
-
-    const verified = accountMatch && nameMatch;
-    if (verified) return { verified: true, reasons: [] };
-
-    // Account and name are the two things that gate submission — the
-    // receipt clearly needs to show a transfer to our account/name.
-    // If we simply never found a field at all (rather than found a
-    // contradicting value), that still counts as unverified — we require
-    // both to be positively confirmed before calling it "verified".
-    return { verified: false, reasons };
-  },
-
-  /**
-   * Transaction ID, Date, and Time are filled as aggressively as
-   * possible — falling back to loose heuristics when no labeled
-   * match is found — since the member always reviews and can correct
-   * them before submitting. Amount stays conservative (label-only)
-   * since a wrong amount auto-fill is more likely to mislead than help.
+   * Very deliberately conservative: only pulls out a value when a
+   * recognizable label is right next to it. Never guesses. Anything
+   * it can't find confidently is left blank for the user to fill in.
    */
   extract(text) {
     const result = { transactionId: "", date: "", time: "", amount: null };
 
     // --- Transaction ID / Reference / Voucher / Receipt No ---
     const idLabels = /(?:transaction\s*id|txn\s*id|trx\s*id|reference\s*(?:no\.?|number)?|ref\.?\s*no\.?|ref|voucher\s*(?:no\.?|number)?|receipt\s*no\.?|transfer\s*id|payment\s*id|tracking\s*(?:no\.?|number)?)\s*[:\-]?\s*([A-Za-z0-9]{5,25})/i;
-    let idMatch = text.match(idLabels);
-    if (idMatch) {
-      result.transactionId = idMatch[1].trim();
-    } else {
-      // Fallback: no recognizable label — grab the most "ID-like" standalone
-      // token in the text (mixed letters+digits, or a long digit run),
-      // preferring the longest candidate since receipt IDs are rarely short.
-      const tokens = text.match(/\b[A-Za-z0-9]{6,25}\b/g) || [];
-      const idLike = tokens.filter(t => /\d/.test(t) && !/^\d{1,2}$/.test(t));
-      if (idLike.length) {
-        idLike.sort((a,b) => b.length - a.length);
-        result.transactionId = idLike[0];
-      }
-    }
+    const idMatch = text.match(idLabels);
+    if (idMatch) result.transactionId = idMatch[1].trim();
 
     // --- Date (several common formats) ---
     const months = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 };
@@ -1614,15 +1456,12 @@ const ReceiptOCR = {
     } else if ((m = text.match(/(\d{1,2})[\s\-]+([A-Za-z]{3,9})[\s\-]+(\d{4})/))) {
       const mo = months[m[2].toLowerCase().slice(0,3)];
       if (mo) d = { y: +m[3], mo, da: +m[1] };
-    } else if ((m = text.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})\b/))) {
-      // 2-digit year fallback, e.g. 18-07-26
-      d = { y: 2000 + (+m[3]), mo: +m[2], da: +m[1] };
     }
     if (d && d.mo >= 1 && d.mo <= 12 && d.da >= 1 && d.da <= 31) {
       result.date = `${d.y}-${String(d.mo).padStart(2,"0")}-${String(d.da).padStart(2,"0")}`;
     }
 
-    // --- Time (12h or 24h, falls back to any HH:MM-shaped token) ---
+    // --- Time (12h or 24h) ---
     if ((m = text.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?/))) {
       let hh = +m[1], mm = m[2];
       const ap = m[4] ? m[4].toUpperCase() : null;
